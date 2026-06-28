@@ -454,7 +454,9 @@ void from_json(T &&v, auto &ctx, auto &it, auto &end) {
     decltype(auto) mutable_v = hpp_proto::detail::as_modifiable(ctx, v);
     from<JSON, decltype(mutable_v)>::template op<Opts>(mutable_v, ctx, it, end);
   } else if constexpr (::hpp_proto::concepts::integral_64_bits<T>) {
-    from<JSON, value_t>::template op<opt_true<ws_handled<Opts>(), quoted_num_opt_tag{}>>(v, ctx, it, end);
+    // This fork renders 64-bit ints BARE (unquoted), not as proto3 quoted
+    // strings (that convention exists only for JS float precision). Read bare.
+    from<JSON, value_t>::template op<ws_handled<Opts>()>(v, ctx, it, end);
   } else if constexpr (pair_t<value_t>) {
     util::parse_key_and_colon<Opts>(::hpp_proto::detail::as_modifiable(ctx, v.first), ctx, it, end);
     validate_utf8_if_string(ctx, v.first);

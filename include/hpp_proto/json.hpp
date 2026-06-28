@@ -194,11 +194,9 @@ struct to<JSON, hpp_proto::optional<Type, Default>> {
   template <auto Opts>
   GLZ_ALWAYS_INLINE static void op(auto const &value, auto &ctx, auto &it, auto &end) noexcept {
     if (value.has_value()) {
-      if constexpr (::hpp_proto::concepts::integral_64_bits<Type>) {
-        to<JSON, Type>::template op<opt_true<Opts, quoted_num_opt_tag{}>>(*value, ctx, it, end);
-      } else {
-        to<JSON, Type>::template op<Opts>(*value, ctx, it, end);
-      }
+      // This fork renders 64-bit ints BARE (unquoted), not as proto3
+      // quoted strings. Write bare for all numeric types.
+      to<JSON, Type>::template op<Opts>(*value, ctx, it, end);
     }
   }
 };
@@ -244,12 +242,9 @@ template <typename Type, auto Default>
 struct to<JSON, hpp_proto::optional_ref<Type, Default>> {
   template <auto Opts, class... Args>
   GLZ_ALWAYS_INLINE static void op(auto &&value, Args &&...args) noexcept {
-    if constexpr (::hpp_proto::concepts::jsonfy_need_quote<Type>) {
-      to<JSON, std::decay_t<decltype(*value)>>::template op<opt_true<Opts, quoted_num_opt_tag{}>>(
-          *value, std::forward<Args>(args)...);
-    } else {
-      to<JSON, std::decay_t<decltype(*value)>>::template op<Opts>(*value, std::forward<Args>(args)...);
-    }
+    // This fork renders 64-bit ints BARE (unquoted), not as proto3
+    // quoted strings. Write bare for all numeric types.
+    to<JSON, std::decay_t<decltype(*value)>>::template op<Opts>(*value, std::forward<Args>(args)...);
   }
 };
 
@@ -284,8 +279,16 @@ template <typename Type, std::size_t Index>
 struct from<JSON, hpp_proto::oneof_wrapper<Type, Index>> {
   template <auto Opts>
   GLZ_ALWAYS_INLINE static void op(auto &&value, auto &ctx, auto &it, auto &end) noexcept {
-    if (!util::parse_null<Opts>(value, ctx, it, end)) {
-      using alt_type = std::variant_alternative_t<Index, Type>;
+    using alt_type = std::variant_alternative_t<Index, Type>;
+    // google.protobuf.NullValue WKT arm: the JSON value is literally `null`, which is
+    // the value (not "field absent"). Detect it structurally (enum with a NULL_VALUE
+    // enumerator) and emplace it so its from<JSON> consumes the `null` token; otherwise
+    // parse_null would short-circuit and leave the oneof unset.
+    if constexpr (std::is_enum_v<alt_type> && requires { alt_type::NULL_VALUE; }) {
+      // Route to from<JSON, NullValue> directly (consumes the `null` token); util::from_json
+      // would treat the unquoted token as an int32 and fail on `null`.
+      from<JSON, alt_type>::template op<Opts>(value.value->template emplace<Index>(), ctx, it, end);
+    } else if (!util::parse_null<Opts>(value, ctx, it, end)) {
       if constexpr (requires { value.value->template emplace<Index>(); }) {
         util::from_json<Opts>(value.value->template emplace<Index>(), ctx, it, end);
       } else {
