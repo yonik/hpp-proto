@@ -1411,10 +1411,7 @@ struct hpp_meta_generator : code_generator {
     }
     format_to(target,
               "bool decode({0} &msg, std::span<const std::byte> data, std::pmr::memory_resource &arena) {{\n"
-              // Non-padded read: the caller need not guarantee a readable trailing byte
-              // (mmap'd file reads, raw gRPC ByteBuffers). padded_input is only a varint
-              // end-check elision; decode is not on the hot path, so default to safe.
-              "  return ::hpp_proto::read_binpb(msg, data, ::hpp_proto::alloc_from(arena)).ok();\n"
+              "  return ::hpp_proto::read_binpb(msg, data, ::hpp_proto::padded_input, ::hpp_proto::alloc_from(arena)).ok();\n"
               "}}\n"
               "bool encode(const {0} &msg, std::vector<std::byte> &out) {{\n"
               "  return ::hpp_proto::write_binpb(msg, out).ok();\n"
@@ -1444,6 +1441,8 @@ struct hpp_meta_generator : code_generator {
     for (auto &m : descriptor.messages()) {
       emit_concrete_pb_meta(m);
     }
+    format_to(target, "// decode() uses hpp_proto::padded_input: callers must guarantee\n"
+                      "// 16 readable bytes past data.end(), with the first one zero.\n\n");
     for (auto &m : descriptor.messages()) {
       emit_concrete_entry_points(m);
     }
