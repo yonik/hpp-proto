@@ -578,12 +578,37 @@ const static hpp_proto::flat_map<std::string, std::string> well_known_codecs = {
     {"google.protobuf.Timestamp", "timestamp_codec"},
     {"google.protobuf.FieldMask", "field_mask_codec"}};
 
+// protoc's default json_name derivation (descriptor.cc ToJsonName): drop underscores,
+// capitalizing the following letter. protoc always populates json_name, so comparing
+// against this default detects an explicit [json_name = "..."] override.
+inline std::string default_json_name(const std::string &proto_name) {
+  std::string result;
+  result.reserve(proto_name.size());
+  bool capitalize_next = false;
+  for (char c : proto_name) {
+    if (c == '_') {
+      capitalize_next = true;
+    } else if (capitalize_next) {
+      result += (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+      capitalize_next = false;
+    } else {
+      result += c;
+    }
+  }
+  return result;
+}
+
 struct code_generator {
   static std::filesystem::path plugin_name;
   static std::string plugin_parameters;
   static std::vector<std::string> proto2_explicit_presences;
   static std::string directory_prefix;
   static bool preserve_proto_field_names;
+  // When false ("json_aliases=false"), emit only the primary JSON key per field -
+  // no as_alias/as_oneof_alias entries - so the JSON surface accepts exactly one
+  // spelling. With preserve_proto_field_names, an explicit json_name override still
+  // becomes the primary key (detected as json_name != protoc's camelCase default).
+  static bool json_aliases;
   // SPIKE: emit hand-friendly CONCRETE classes (std::string_view/std::span members,
   // no Traits template) instead of trait-templated structs. Enabled via the
   // plugin option "concrete=true".
@@ -1016,6 +1041,7 @@ std::string code_generator::plugin_parameters;
 std::vector<std::string> code_generator::proto2_explicit_presences;
 std::string code_generator::directory_prefix;
 bool code_generator::preserve_proto_field_names = false;
+bool code_generator::json_aliases = true;
 bool code_generator::concrete = false;
 std::string code_generator::concrete_namespace;
 
@@ -1826,12 +1852,19 @@ struct glaze_meta_generator : code_generator {
       return;
     }
     // Qualified ::hpp_proto::*_json calls (no ADL) so demo::read_json doesn't recurse.
+    // `error` (declared defaulted to nullptr) receives glaze's formatted parse error
+    // (position + reason) for client-facing reporting.
     format_to(target,
               "bool write_json(const {0} &msg, std::string &out) {{\n"
               "  return ::hpp_proto::write_json(msg, out).ok();\n"
               "}}\n"
-              "bool read_json({0} &msg, std::string_view json, std::pmr::memory_resource &arena) {{\n"
-              "  return ::hpp_proto::read_json(msg, json, ::hpp_proto::alloc_from(arena)).ok();\n"
+              "bool read_json({0} &msg, std::string_view json, std::pmr::memory_resource &arena,\n"
+              "               std::string *error) {{\n"
+              "  auto status = ::hpp_proto::read_json(msg, json, ::hpp_proto::alloc_from(arena));\n"
+              "  if (!status.ok() && error != nullptr) {{\n"
+              "    *error = status.message(json);\n"
+              "  }}\n"
+              "  return status.ok();\n"
               "}}\n\n",
               descriptor.cpp_name);
   }
@@ -2200,13 +2233,15 @@ struct glaze_meta_generator : code_generator {
     const std::string &proto_name = descriptor.proto().name;
 
     if (code_generator::preserve_proto_field_names) {
-      emit_field(proto_name, false);
-      if (json_name != proto_name) {
-        emit_field(json_name, true);
+      // An explicit [json_name = "..."] override is still the primary key.
+      const bool renamed = json_name != default_json_name(proto_name);
+      emit_field(renamed ? json_name : proto_name, false);
+      if (code_generator::json_aliases && json_name != proto_name) {
+        emit_field(renamed ? proto_name : json_name, true);
       }
     } else {
       emit_field(json_name, false);
-      if (proto_name != json_name) {
+      if (code_generator::json_aliases && proto_name != json_name) {
         emit_field(proto_name, true);
       }
     }
@@ -2230,13 +2265,15 @@ struct glaze_meta_generator : code_generator {
         const std::string &proto_name = fields[i].proto().name;
 
         if (code_generator::preserve_proto_field_names) {
-          emit_oneof(proto_name, false);
-          if (json_name != proto_name) {
-            emit_oneof(json_name, true);
+          // An explicit [json_name = "..."] override is still the primary key.
+          const bool renamed = json_name != default_json_name(proto_name);
+          emit_oneof(renamed ? json_name : proto_name, false);
+          if (code_generator::json_aliases && json_name != proto_name) {
+            emit_oneof(renamed ? proto_name : json_name, true);
           }
         } else {
           emit_oneof(json_name, false);
-          if (proto_name != json_name) {
+          if (code_generator::json_aliases && proto_name != json_name) {
             emit_oneof(proto_name, true);
           }
         }
@@ -2480,6 +2517,8 @@ int main(int argc, const char **argv) {
       code_generator::proto2_explicit_presences.emplace_back(opt_value);
     } else if (opt_key == "preserve_proto_field_names") {
       code_generator::preserve_proto_field_names = (opt_value == "true" || opt_value.empty());
+    } else if (opt_key == "json_aliases") {
+      code_generator::json_aliases = (opt_value != "false");
     } else if (opt_key == "concrete_namespace") {
       code_generator::concrete_namespace = make_qualified_cpp_name("", opt_value);
     } else if (opt_key == "concrete") {
