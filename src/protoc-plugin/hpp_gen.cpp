@@ -609,6 +609,11 @@ struct code_generator {
   // spelling. With preserve_proto_field_names, an explicit json_name override still
   // becomes the primary key (detected as json_name != protoc's camelCase default).
   static bool json_aliases;
+  // When true ("lowercase_enum_json=true"), enum values serialize to JSON as the
+  // ASCII-lowercased proto enumerator name ("TEXT" -> "text"). Reads accept only
+  // that lowered spelling (plus the always-available bare integer). C++
+  // enumerator names are unaffected.
+  static bool lowercase_enum_json;
   // SPIKE: emit hand-friendly CONCRETE classes (std::string_view/std::span members,
   // no Traits template) instead of trait-templated structs. Enabled via the
   // plugin option "concrete=true".
@@ -1042,6 +1047,7 @@ std::vector<std::string> code_generator::proto2_explicit_presences;
 std::string code_generator::directory_prefix;
 bool code_generator::preserve_proto_field_names = false;
 bool code_generator::json_aliases = true;
+bool code_generator::lowercase_enum_json = false;
 bool code_generator::concrete = false;
 std::string code_generator::concrete_namespace;
 
@@ -1879,6 +1885,11 @@ struct glaze_meta_generator : code_generator {
               "#include <hpp_proto/json.hpp>\n\n",
               basename(descriptor.proto().name, directory_prefix));
     // pass 1: glz::meta + has_glz specializations (global scope), order-independent.
+    // File-scope enums first (message-nested ones are emitted with their message);
+    // without a meta, glaze would fall back to reading the enum as a bare integer.
+    for (auto &e : descriptor.enums()) {
+      process(e);
+    }
     for (auto &m : descriptor.messages()) {
       emit_concrete_glz_meta(m);
     }
@@ -2300,7 +2311,12 @@ struct glaze_meta_generator : code_generator {
       std::ranges::sort(values, {}, [](auto *v) { return v->number; });
       for (const auto *e : values) {
         const char *sep = (index++ == values.size() - 1) ? ");" : ",";
-        format_to(target, "{0}\"{1}\", {1}{2}\n", indent(), resolve_keyword(e->name), sep);
+        std::string json_name{e->name};
+        if (code_generator::lowercase_enum_json) {
+          std::ranges::transform(json_name, json_name.begin(),
+                                 [](char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; });
+        }
+        format_to(target, "{0}\"{1}\", {2}{3}\n", indent(), json_name, resolve_keyword(e->name), sep);
       }
 
       indent_num -= 4;
@@ -2519,6 +2535,8 @@ int main(int argc, const char **argv) {
       code_generator::preserve_proto_field_names = (opt_value == "true" || opt_value.empty());
     } else if (opt_key == "json_aliases") {
       code_generator::json_aliases = (opt_value != "false");
+    } else if (opt_key == "lowercase_enum_json") {
+      code_generator::lowercase_enum_json = (opt_value == "true" || opt_value.empty());
     } else if (opt_key == "concrete_namespace") {
       code_generator::concrete_namespace = make_qualified_cpp_name("", opt_value);
     } else if (opt_key == "concrete") {
