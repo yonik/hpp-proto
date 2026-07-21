@@ -853,6 +853,64 @@ struct code_generator {
     return resolved_messages;
   }
 
+  // Concrete message classes have a fixed map value representation. If one map
+  // edge to a message type must be indirect to break a dependency cycle, keep
+  // every map edge to that type indirect. Otherwise an unrelated schema change
+  // can change which edge breaks the cycle and make regenerated metadata stop
+  // matching the hand-written concrete classes.
+  static void stabilize_recursive_map_values(auto messages_view) {
+    using enum FieldDescriptorProto::Label;
+    using enum FieldDescriptorProto::Type;
+    std::set<message_descriptor_t *> indirect_types;
+    std::map<message_descriptor_t *, std::vector<message_descriptor_t *>> hard_edges;
+    std::vector<std::pair<message_descriptor_t *, message_descriptor_t *>> map_edges;
+    auto visit = [](auto &&self, auto nested, auto &&fn) -> void {
+      for (auto &message : nested) {
+        fn(message);
+        self(self, message.messages(), fn);
+      }
+    };
+    visit(visit, messages_view, [&](message_descriptor_t &message) {
+      for (auto &field : message.fields()) {
+        if (field.is_map_entry()) {
+          auto *entry = field.message_field_type_descriptor();
+          auto *target = entry->fields()[1].message_field_type_descriptor();
+          map_edges.emplace_back(&message, target);
+          if (field.is_recursive) indirect_types.insert(target);
+        } else if ((field.proto().type == TYPE_MESSAGE || field.proto().type == TYPE_GROUP)
+                   && field.proto().label != LABEL_REPEATED && !field.is_recursive) {
+          hard_edges[&message].push_back(field.message_field_type_descriptor());
+        }
+      }
+      if (message.is_map_entry() && message.fields()[1].is_recursive) {
+        indirect_types.insert(message.fields()[1].message_field_type_descriptor());
+      }
+    });
+
+    auto reaches = [&](message_descriptor_t *from, message_descriptor_t *to) {
+      std::set<message_descriptor_t *> seen;
+      auto walk = [&](auto &&self, message_descriptor_t *at) -> bool {
+        if (at == to) return true;
+        if (!seen.insert(at).second) return false;
+        for (auto *next : hard_edges[at]) {
+          if (self(self, next)) return true;
+        }
+        return false;
+      };
+      return walk(walk, from);
+    };
+    for (auto [owner, target] : map_edges) {
+      if (reaches(target, owner)) indirect_types.insert(target);
+    }
+
+    visit(visit, messages_view, [&](message_descriptor_t &message) {
+      if (message.is_map_entry()
+          && indirect_types.contains(message.fields()[1].message_field_type_descriptor())) {
+        message.fields()[1].is_recursive = true;
+      }
+    });
+  }
+
   void gen_file_header(const std::string &file) const {
     format_to(target,
               "// clang-format off\n"
@@ -2596,6 +2654,7 @@ int main(int argc, const char **argv) {
       // the order) so concrete_map_meta_type emits indirect_view<V> for recursive map
       // values (e.g. map<string,Val>) instead of an incomplete by-value V.
       (void)code_generator::order_messages((*descriptor).messages());
+      code_generator::stabilize_recursive_map_values((*descriptor).messages());
     }
 
     hpp_meta_generator hpp_meta_code(response.file);
