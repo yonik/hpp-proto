@@ -294,6 +294,28 @@ bool match_ending_or_consume_comma(auto ws_start, size_t ws_size, bool &first, g
 }
 
 /**
+ * @brief Name a key that an on_key callback rejected, and point the error at it.
+ *
+ * on_key runs with `it` at the value, so a bare unknown_key set there would put the caret on
+ * the value and say nothing about which key was refused. Called only when the callback set
+ * unknown_key without consuming the value (so the error is about this key, not one nested in
+ * the value). The message is the key's raw quoted token from the input, like glaze's own
+ * missing_key reporting, and it stays valid as long as the input buffer does.
+ */
+inline void report_unknown_key(glz::is_context auto &ctx, auto key_start, auto &it) {
+  if (ctx.custom_error_message.empty() && *key_start == '"') {
+    auto q = key_start + 1;
+    while (q < it && *q != '"') {
+      q += (*q == '\\') ? 2 : 1; // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    }
+    if (q < it) {
+      ctx.custom_error_message = std::string_view{key_start, static_cast<std::size_t>(q + 1 - key_start)};
+    }
+  }
+  it = key_start;
+}
+
+/**
  * @brief Scan an object field list, invoking callbacks around each key.
  *
  * @tparam Opts Glaze parsing options controlling whitespace, comments, and termination behavior.
@@ -330,11 +352,16 @@ void scan_object_fields(glz::is_context auto &ctx, auto &it, auto &end, auto &&k
       return;
     }
     on_key_start(it, end);
+    const auto key_start = it;
     util::parse_key_and_colon<Opts>(key, ctx, it, end);
     if (bool(ctx.error)) [[unlikely]] {
       return;
     }
+    const auto value_start = it;
     if (on_key(it, end)) {
+      if (ctx.error == error_code::unknown_key && it == value_start) [[unlikely]] {
+        report_unknown_key(ctx, key_start, it);
+      }
       return;
     }
     if (skip_ws<Opts>(ctx, it, end)) {

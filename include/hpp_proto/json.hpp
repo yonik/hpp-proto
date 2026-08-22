@@ -449,8 +449,44 @@ concept non_null_terminated_str = std::ranges::contiguous_range<T> &&
 struct [[nodiscard]] json_status final {
   glz::error_ctx ctx;
   [[nodiscard]] bool ok() const { return !static_cast<bool>(ctx); }
-  [[nodiscard]] std::string message(const auto &buffer) const { return glz::format_error(ctx, buffer); }
+  /// Like glz::format_error(ctx, buffer), but with custom_error_message on the diagnostic line
+  /// ("1:40: unknown_key \"feilds\"") rather than trailing the caret, so that line stands alone.
+  [[nodiscard]] std::string message(const auto &buffer) const {
+    std::string what{glz::meta<glz::error_code>::keys[static_cast<uint32_t>(ctx.ec)]};
+    if (!ctx.custom_error_message.empty()) {
+      what += ' ';
+      what += ctx.custom_error_message;
+    }
+    return glz::detail::generate_error_string(what, glz::detail::get_source_info(buffer, ctx.count));
+  }
 };
+
+namespace detail {
+/// glaze's object reader reports unknown_key positioned at the key's first character (just past
+/// its opening quote) but does not name the key. Recover the quoted key from the input so the
+/// error names it, the way util::scan_object_fields does for hpp-proto's own readers, and point
+/// the error at the key token (the message views the input, like the error position does). Left
+/// alone when the key is already named or the position does not look like an object key.
+inline void name_unknown_key(glz::error_ctx &ec, const auto &buffer) {
+  const std::string_view in{reinterpret_cast<const char *>(std::ranges::data(buffer)), std::ranges::size(buffer)};
+  if (!ec.custom_error_message.empty() || ec.count == 0 || ec.count >= in.size() || in[ec.count - 1] != '"') {
+    return;
+  }
+  std::size_t q = ec.count;
+  while (q < in.size() && in[q] != '"') {
+    q += (in[q] == '\\') ? 2 : 1;
+  }
+  if (q >= in.size()) {
+    return;
+  }
+  const std::size_t after = in.find_first_not_of(" \t\r\n", q + 1);
+  if (after == std::string_view::npos || in[after] != ':') {
+    return;
+  }
+  ec.custom_error_message = in.substr(ec.count - 1, q + 2 - ec.count);
+  --ec.count;
+}
+} // namespace detail
 
 /// @brief Deserializes JSON from a buffer into a message object.
 /// @details Compared to glz::read, this wrapper:
@@ -475,7 +511,9 @@ inline json_status read_json_buffer(concepts::read_json_supported auto &value, a
     value = std::decay_t<decltype(value)>{};
   }
   json_status status = {glz::read<Opts>(value, buffer, ctx)};
-  if (status.ok() && status.ctx.count < buffer.size()) {
+  if (status.ctx.ec == glz::error_code::unknown_key) {
+    detail::name_unknown_key(status.ctx, buffer);
+  } else if (status.ok() && status.ctx.count < buffer.size()) {
     auto it = std::next(buffer.begin(), static_cast<std::ptrdiff_t>(status.ctx.count));
     // glz::skip_ws requires a mutable context even though this call only uses it locally.
     // NOLINTNEXTLINE(misc-const-correctness)
