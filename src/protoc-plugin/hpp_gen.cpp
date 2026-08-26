@@ -1929,6 +1929,14 @@ struct glaze_meta_generator : code_generator {
               "    *error = status.message(json);\n"
               "  }}\n"
               "  return status.ok();\n"
+              "}}\n"
+              "bool merge_json({0} &msg, std::string_view json, std::pmr::memory_resource &arena,\n"
+              "                std::string *error) {{\n"
+              "  auto status = ::hpp_proto::merge_json(msg, json, ::hpp_proto::alloc_from(arena));\n"
+              "  if (!status.ok() && error != nullptr) {{\n"
+              "    *error = status.message(json);\n"
+              "  }}\n"
+              "  return status.ok();\n"
               "}}\n\n",
               descriptor.cpp_name);
   }

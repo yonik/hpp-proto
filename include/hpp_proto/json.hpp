@@ -499,7 +499,7 @@ inline void name_unknown_key(glz::error_ctx &ec, const auto &buffer) {
 /// @param buffer The input buffer containing JSON bytes.
 /// @param option Optional configuration parameters.
 /// @return json_status indicating success or failure.
-template <auto Opts>
+template <auto Opts, bool Initialize = true>
 inline json_status read_json_buffer(concepts::read_json_supported auto &value, auto const &buffer,
                                     concepts::is_option_type auto &&...option) {
   using value_type = std::remove_cvref_t<decltype(value)>;
@@ -507,7 +507,7 @@ inline json_status read_json_buffer(concepts::read_json_supported auto &value, a
                 "the generated .glz.hpp is required for hpp_gen messages");
 
   json_context ctx{std::forward<decltype(option)>(option)...};
-  if constexpr (std::is_aggregate_v<std::decay_t<decltype(value)>>) {
+  if constexpr (Initialize && std::is_aggregate_v<std::decay_t<decltype(value)>>) {
     value = std::decay_t<decltype(value)>{};
   }
   json_status status = {glz::read<Opts>(value, buffer, ctx)};
@@ -525,6 +525,25 @@ inline json_status read_json_buffer(concepts::read_json_supported auto &value, a
     }
   }
   return status;
+}
+
+/// @brief Merges JSON fields into an existing aggregate instead of first
+/// resetting it to default values. Parsing and validation otherwise match
+/// read_json().
+template <auto Opts = json_read_opts{}>
+inline json_status merge_json(concepts::read_json_supported auto &value,
+                              concepts::non_null_terminated_str auto const &buffer,
+                              concepts::is_option_type auto &&...option) {
+  constexpr auto opts = [] {
+    auto ret = Opts;
+    ret.null_terminated = false;
+    return ret;
+  }();
+  using char_type = std::remove_cvref_t<std::ranges::range_value_t<decltype(buffer)>>;
+  const auto view = std::basic_string_view<char_type>{std::ranges::data(buffer),
+                                                       std::ranges::size(buffer)};
+  return read_json_buffer<opts, false>(value, view,
+                                      std::forward<decltype(option)>(option)...);
 }
 
 /// @brief Deserializes JSON from a contiguous char/char8_t range that is not null-terminated.
